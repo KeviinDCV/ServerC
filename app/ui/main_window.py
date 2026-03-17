@@ -32,15 +32,20 @@ class MainWindow(ctk.CTk):
         try:
             import os, sys
             from PIL import Image, ImageTk
-            base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            
-            # support both favicon.png and icon.ico
-            icon_png = os.path.join(base, "..", "assets", "favicon.png")
-            icon_ico = os.path.join(base, "..", "assets", "icon.ico")
-            
+
+            # When compiled: _MEIPASS/assets/  When running from source: project/assets/
+            if getattr(sys, '_MEIPASS', None):
+                assets_dir = os.path.join(sys._MEIPASS, "assets")
+            else:
+                assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets")
+
+            icon_png = os.path.join(assets_dir, "favicon.png")
+            icon_ico = os.path.join(assets_dir, "icon.ico")
+
             if os.path.exists(icon_png):
-                img = ImageTk.PhotoImage(Image.open(icon_png))
-                self.wm_iconphoto(True, img)
+                img = Image.open(icon_png)
+                self._icon_img = ImageTk.PhotoImage(img)
+                self.wm_iconphoto(True, self._icon_img)
             elif os.path.exists(icon_ico):
                 self.iconbitmap(icon_ico)
         except Exception as e:
