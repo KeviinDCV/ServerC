@@ -25,7 +25,7 @@ class DashboardView(ctk.CTkFrame):
         header.pack(fill="x", padx=20, pady=(15, 5))
         header.pack_propagate(False)
 
-        ctk.CTkLabel(header, text="🖥  ServerC Monitor", font=FONTS["title"],
+        ctk.CTkLabel(header, text="🖥  ServerC Monitor HUV", font=FONTS["title"],
                       text_color=COLORS["text_primary"]).pack(side="left")
 
         self.add_btn = ctk.CTkButton(

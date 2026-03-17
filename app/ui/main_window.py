@@ -23,7 +23,7 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         # Window configuration
-        self.title("ServerC — Monitor de Servidores")
+        self.title("ServerC Monitor HUV")
         self.geometry("1200x750")
         self.minsize(900, 600)
         self.configure(fg_color=COLORS["bg_dark"])
