@@ -1,0 +1,5 @@
+customtkinter>=5.2.1
+pywinrm>=0.4.3
+cryptography>=42.0.0
+Pillow>=10.4.0
+pyinstaller>=6.5.0
