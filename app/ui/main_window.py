@@ -31,12 +31,20 @@ class MainWindow(ctk.CTk):
         # Try to set icon
         try:
             import os, sys
+            from PIL import Image, ImageTk
             base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            icon_path = os.path.join(base, "..", "assets", "icon.ico")
-            if os.path.exists(icon_path):
-                self.iconbitmap(icon_path)
-        except Exception:
-            pass
+            
+            # support both favicon.png and icon.ico
+            icon_png = os.path.join(base, "..", "assets", "favicon.png")
+            icon_ico = os.path.join(base, "..", "assets", "icon.ico")
+            
+            if os.path.exists(icon_png):
+                img = ImageTk.PhotoImage(Image.open(icon_png))
+                self.wm_iconphoto(True, img)
+            elif os.path.exists(icon_ico):
+                self.iconbitmap(icon_ico)
+        except Exception as e:
+            print("Icon load error:", e)
 
         # State
         self.servers: list = load_servers()
