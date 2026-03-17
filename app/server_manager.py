@@ -199,3 +199,18 @@ def test_connection(server: ServerConfig) -> tuple:
             return False, f"Error: {err}"
     except Exception as e:
         return False, f"Error de conexión: {e}"
+
+
+def logoff_user(server: ServerConfig, session_id: str) -> tuple[bool, str]:
+    """Force logoff a specific user session on the server."""
+    try:
+        session = _create_session(server)
+        # Using quser's logoff command which is typically `logoff <session_id>`
+        result = session.run_ps(f"logoff {session_id}")
+        if result.status_code == 0:
+            return True, f"Sesión {session_id} cerrada exitosamente."
+        else:
+            err = result.std_err.decode("utf-8", errors="replace").strip()
+            return False, f"Error al cerrar la sesión: {err}"
+    except Exception as e:
+        return False, f"Error de conexión al cerrar sesión: {e}"

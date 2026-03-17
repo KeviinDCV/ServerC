@@ -67,9 +67,8 @@ class ServerDetailView(ctk.CTkFrame):
         header_row = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8, height=36)
         header_row.pack(fill="x", padx=20, pady=(0, 2))
         header_row.pack_propagate(False)
-        cols = [("Usuario", 0.2), ("Sesión", 0.1), ("Estado", 0.12), ("Inactivo", 0.12),
-                ("Equipo Cliente", 0.18), ("Inicio Sesión", 0.28)]
-        for text, weight in cols:
+        cols = ["Usuario", "Sesión", "Estado", "Inactivo", "Equipo Cliente", "Inicio Sesión", "Acciones"]
+        for text in cols:
             lbl = ctk.CTkLabel(header_row, text=text, font=FONTS["small_bold"],
                                 text_color=COLORS["text_secondary"])
             lbl.pack(side="left", fill="both", expand=True)
@@ -108,6 +107,7 @@ class ServerDetailView(ctk.CTkFrame):
 
     def update_status(self, status: ServerStatus):
         """Update the view with new server status data."""
+        self.current_status = status
         self.server_title.configure(text=status.server.display_name)
 
         if status.is_online:
@@ -160,6 +160,9 @@ class ServerDetailView(ctk.CTkFrame):
 
     def _populate_sessions(self, sessions: list):
         """Clear and repopulate session rows."""
+        import threading
+        from app.server_manager import logoff_user
+        
         for widget in self.sessions_scroll.winfo_children():
             widget.destroy()
 
@@ -167,6 +170,22 @@ class ServerDetailView(ctk.CTkFrame):
             ctk.CTkLabel(self.sessions_scroll, text="No hay sesiones activas",
                           font=FONTS["body"], text_color=COLORS["text_muted"]).pack(pady=30)
             return
+
+        def _do_logoff(session_id, username):
+            # Prompt for confirmation
+            dialog = ctk.CTkInputDialog(
+                text=f"Escribe 'CERRAR' para desconectar al usuario {username} (Sesión: {session_id})",
+                title="Confirmar Cierre de Sesión"
+            )
+            result = dialog.get_input()
+            if result and result.strip().upper() == "CERRAR":
+                self.error_label.configure(text=f"Cerrando sesión de {username}...", text_color=COLORS["text_secondary"])
+                self.error_label.pack(fill="x", padx=20, pady=5)
+                
+                def _bg_task():
+                    success, msg = logoff_user(self.current_status.server, session_id)
+                    self.after(0, lambda: self._on_logoff_result(success, msg))
+                threading.Thread(target=_bg_task, daemon=True).start()
 
         for i, s in enumerate(sessions):
             row_color = COLORS["bg_medium"] if i % 2 == 0 else COLORS["bg_dark"]
@@ -184,7 +203,30 @@ class ServerDetailView(ctk.CTkFrame):
                 (s.client_name or "—", COLORS["text_secondary"], FONTS["body"]),
                 (s.logon_time, COLORS["text_secondary"], FONTS["small"]),
             ]
+            
+            # Pack all text labels
             for text, color, font in values:
-                ctk.CTkLabel(row, text=text, font=font, text_color=color).pack(
-                    side="left", fill="both", expand=True,
+                lbl_container = ctk.CTkFrame(row, fg_color="transparent")
+                lbl_container.pack(side="left", fill="both", expand=True)
+                ctk.CTkLabel(lbl_container, text=text, font=font, text_color=color).pack(expand=True)
+            
+            # Action button container
+            action_container = ctk.CTkFrame(row, fg_color="transparent")
+            action_container.pack(side="left", fill="both", expand=True)
+            
+            # Ensure "Services" / "Console" session isn't easily killed by mistake, though the prompt stops them
+            if str(s.session_id) != "0":
+                btn = ctk.CTkButton(
+                    action_container, text="Cerrar", width=60, height=24,
+                    font=FONTS["small_bold"], fg_color=COLORS["critical"],
+                    hover_color="#c0392b",
+                    command=lambda sid=s.session_id, u=s.username: _do_logoff(sid, u)
                 )
+                btn.pack(expand=True, pady=4)
+
+    def _on_logoff_result(self, success: bool, msg: str):
+        color = COLORS["success"] if success else COLORS["critical"]
+        self.error_label.configure(text=msg, text_color=color)
+        self.error_label.pack(fill="x", padx=20, pady=5)
+        # Optionally, trigger a refresh of the parent window here, but it auto-refreshes every 30s anyway.
+
