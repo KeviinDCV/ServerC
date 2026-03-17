@@ -1,14 +1,17 @@
-"""Dashboard view — grid of server cards with live status."""
+"""Dashboard view — grid of server cards with live status, filters, and grid size control."""
 
 import customtkinter as ctk
-from typing import Dict
+from typing import Dict, List, Tuple
+from collections import Counter
 
 from app.models import ServerStatus
 from app.ui.styles import COLORS, FONTS
 
 
 class DashboardView(ctk.CTkFrame):
-    """Main dashboard showing all servers as status cards."""
+    """Main dashboard showing all servers as status cards with filtering."""
+
+    GRID_OPTIONS = {"Pequeño (5)": 5, "Normal (4)": 4, "Grande (3)": 3, "XL (2)": 2}
 
     def __init__(self, parent, on_server_click, on_add_server, on_edit_server, on_delete_server):
         super().__init__(parent, fg_color=COLORS["bg_dark"])
@@ -17,10 +20,13 @@ class DashboardView(ctk.CTkFrame):
         self.on_edit_server = on_edit_server
         self.on_delete_server = on_delete_server
         self.cards: Dict[str, ctk.CTkFrame] = {}
+        self._all_statuses: Dict[str, ServerStatus] = {}
+        self._cols = 3
+        self._active_filters: Dict[str, str] = {}  # filter_type -> value
         self._build_ui()
 
     def _build_ui(self):
-        # Header
+        # ─── Header ───
         header = ctk.CTkFrame(self, fg_color="transparent", height=60)
         header.pack(fill="x", padx=20, pady=(15, 5))
         header.pack_propagate(False)
@@ -35,9 +41,41 @@ class DashboardView(ctk.CTkFrame):
         )
         self.add_btn.pack(side="right")
 
-        # Summary bar
-        self.summary_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=10, height=45)
-        self.summary_frame.pack(fill="x", padx=20, pady=(5, 10))
+        # ─── Search + Grid Size row ───
+        search_row = ctk.CTkFrame(self, fg_color="transparent")
+        search_row.pack(fill="x", padx=20, pady=(5, 3))
+
+        # Search entry
+        self.search_var = ctk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._apply_filters())
+        self.search_entry = ctk.CTkEntry(
+            search_row, textvariable=self.search_var,
+            placeholder_text="🔍  Buscar por nombre, IP, usuario...",
+            height=38, font=FONTS["body"], width=400,
+            corner_radius=10,
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        # Grid size selector
+        grid_frame = ctk.CTkFrame(search_row, fg_color="transparent")
+        grid_frame.pack(side="right")
+        ctk.CTkLabel(grid_frame, text="Grid:", font=FONTS["small_bold"],
+                      text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 5))
+        self.grid_selector = ctk.CTkSegmentedButton(
+            grid_frame, values=["5", "4", "3", "2"],
+            command=self._on_grid_change, font=FONTS["small_bold"],
+            height=32,
+        )
+        self.grid_selector.set("3")
+        self.grid_selector.pack(side="left")
+
+        # ─── Filter chips row ───
+        self.filter_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.filter_row.pack(fill="x", padx=20, pady=(3, 3))
+
+        # ─── Summary bar ───
+        self.summary_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=10, height=40)
+        self.summary_frame.pack(fill="x", padx=20, pady=(3, 8))
         self.summary_frame.pack_propagate(False)
 
         self.summary_label = ctk.CTkLabel(
@@ -46,69 +84,197 @@ class DashboardView(ctk.CTkFrame):
         )
         self.summary_label.pack(side="left", padx=15)
 
+        self.filter_info_label = ctk.CTkLabel(
+            self.summary_frame, text="",
+            font=FONTS["small"], text_color=COLORS["accent"],
+        )
+        self.filter_info_label.pack(side="left", padx=5)
+
         self.last_update_label = ctk.CTkLabel(
             self.summary_frame, text="",
             font=FONTS["small"], text_color=COLORS["text_muted"],
         )
         self.last_update_label.pack(side="right", padx=15)
 
-        # Scrollable grid area
+        # ─── Scrollable grid area ───
         self.grid_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.grid_scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
-        # Empty state
-        self.empty_label = ctk.CTkLabel(
-            self.grid_scroll,
-            text="No hay servidores configurados.\nHaz clic en '＋ Agregar Servidor' para comenzar.",
-            font=FONTS["body"], text_color=COLORS["text_muted"], justify="center",
-        )
+    # ─── Grid size ───
 
-    def update_all(self, statuses: Dict[str, ServerStatus]):
-        """Refresh all server cards with new statuses."""
-        # Clear existing cards
+    def _on_grid_change(self, value: str):
+        self._cols = int(value)
+        self._apply_filters()
+
+    # ─── Filter logic ───
+
+    def _get_unique_names(self) -> List[str]:
+        """Get server names that appear more than once (groups)."""
+        names = [s.server.name for s in self._all_statuses.values() if s.server.name]
+        counts = Counter(names)
+        return sorted([n for n, c in counts.items() if c > 1])
+
+    def _build_filter_chips(self):
+        """Build dynamic filter chip buttons."""
+        for w in self.filter_row.winfo_children():
+            w.destroy()
+
+        statuses = self._all_statuses
+
+        if not statuses:
+            return
+
+        # "Todos" chip (clear filters)
+        self._add_chip("Todos", "all", "all", is_clear=True)
+
+        # Status filters
+        online_count = sum(1 for s in statuses.values() if s.is_online)
+        offline_count = len(statuses) - online_count
+        self._add_chip(f"✅ En línea ({online_count})", "status", "online")
+        self._add_chip(f"❌ Sin conexión ({offline_count})", "status", "offline")
+
+        # Load filters
+        warning_count = sum(1 for s in statuses.values() if s.is_online and s.load_level == "warning")
+        critical_count = sum(1 for s in statuses.values() if s.is_online and s.load_level == "critical")
+        if warning_count:
+            self._add_chip(f"⚠ Precaución ({warning_count})", "load", "warning")
+        if critical_count:
+            self._add_chip(f"🔴 Sobrecarga ({critical_count})", "load", "critical")
+
+        # Separator
+        sep = ctk.CTkLabel(self.filter_row, text="│", font=FONTS["body"],
+                            text_color=COLORS["text_muted"])
+        sep.pack(side="left", padx=6)
+
+        # Name group filters (servers that share a name)
+        groups = self._get_unique_names()
+        for name in groups[:8]:  # limit to 8 group chips
+            count = sum(1 for s in statuses.values() if s.server.name == name)
+            self._add_chip(f"{name} ({count})", "group", name)
+
+    def _add_chip(self, text: str, filter_type: str, value: str, is_clear: bool = False):
+        is_active = (not self._active_filters and is_clear) or \
+                    self._active_filters.get(filter_type) == value
+
+        fg = COLORS["accent"] if is_active else COLORS["bg_card"]
+        hover = COLORS["accent_hover"] if is_active else COLORS["bg_card_hover"]
+        text_color = COLORS["bg_dark"] if is_active else COLORS["text_secondary"]
+
+        btn = ctk.CTkButton(
+            self.filter_row, text=text, font=FONTS["small_bold"],
+            fg_color=fg, hover_color=hover, text_color=text_color,
+            height=28, corner_radius=14,
+            command=lambda: self._toggle_filter(filter_type, value, is_clear),
+        )
+        btn.pack(side="left", padx=2)
+
+    def _toggle_filter(self, filter_type: str, value: str, is_clear: bool):
+        if is_clear:
+            self._active_filters.clear()
+        elif self._active_filters.get(filter_type) == value:
+            del self._active_filters[filter_type]
+        else:
+            self._active_filters[filter_type] = value
+        self._apply_filters()
+
+    def _filter_statuses(self) -> Dict[str, ServerStatus]:
+        """Apply all active filters and search query to statuses."""
+        result = dict(self._all_statuses)
+        search = self.search_var.get().strip().lower()
+
+        # Text search
+        if search:
+            result = {
+                host: s for host, s in result.items()
+                if search in s.server.name.lower()
+                or search in s.server.host.lower()
+                or search in s.server.username.lower()
+                or search in host.lower()
+                or any(search in sess.username.lower() for sess in s.sessions)
+            }
+
+        # Status filter
+        status_filter = self._active_filters.get("status")
+        if status_filter == "online":
+            result = {h: s for h, s in result.items() if s.is_online}
+        elif status_filter == "offline":
+            result = {h: s for h, s in result.items() if not s.is_online}
+
+        # Load filter
+        load_filter = self._active_filters.get("load")
+        if load_filter:
+            result = {h: s for h, s in result.items() if s.is_online and s.load_level == load_filter}
+
+        # Group (name) filter
+        group_filter = self._active_filters.get("group")
+        if group_filter:
+            result = {h: s for h, s in result.items() if s.server.name == group_filter}
+
+        return result
+
+    def _apply_filters(self):
+        """Re-render cards with current filters."""
+        filtered = self._filter_statuses()
+        self._render_cards(filtered)
+        self._build_filter_chips()
+
+        total = len(self._all_statuses)
+        shown = len(filtered)
+        if shown < total:
+            self.filter_info_label.configure(text=f"Mostrando {shown} de {total}")
+        else:
+            self.filter_info_label.configure(text="")
+
+    # ─── Rendering ───
+
+    def _render_cards(self, statuses: Dict[str, ServerStatus]):
+        """Render the card grid."""
         for widget in self.grid_scroll.winfo_children():
             widget.destroy()
         self.cards.clear()
 
         if not statuses:
-            self.empty_label = ctk.CTkLabel(
-                self.grid_scroll,
-                text="No hay servidores configurados.\nHaz clic en '＋ Agregar Servidor' para comenzar.",
-                font=FONTS["body"], text_color=COLORS["text_muted"], justify="center",
-            )
-            self.empty_label.pack(pady=60)
-            self.summary_label.configure(text="Sin servidores configurados")
+            if self._all_statuses:
+                msg = "No hay servidores que coincidan con los filtros."
+            else:
+                msg = "No hay servidores configurados.\nHaz clic en '＋ Agregar Servidor' para comenzar."
+            ctk.CTkLabel(self.grid_scroll, text=msg,
+                          font=FONTS["body"], text_color=COLORS["text_muted"],
+                          justify="center").pack(pady=60)
             return
 
-        # Create grid of cards (3 per row)
         row_frame = None
-        online_count = 0
-        total_users = 0
-
         for i, (host, status) in enumerate(statuses.items()):
-            if i % 3 == 0:
+            if i % self._cols == 0:
                 row_frame = ctk.CTkFrame(self.grid_scroll, fg_color="transparent")
-                row_frame.pack(fill="x", pady=5)
+                row_frame.pack(fill="x", pady=4)
 
             card = self._create_server_card(row_frame, status)
-            card.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+            card.pack(side="left", fill="both", expand=True, padx=4, pady=4)
             self.cards[host] = card
 
-            if status.is_online:
-                online_count += 1
-                total_users += status.total_sessions
+    def update_all(self, statuses: Dict[str, ServerStatus]):
+        """Refresh all server cards with new statuses (called from main window)."""
+        self._all_statuses = statuses
 
-        total = len(statuses)
-        self.summary_label.configure(
-            text=f"📊 {total} servidores  |  ✅ {online_count} en línea  |  "
-                 f"❌ {total - online_count} sin conexión  |  👥 {total_users} usuarios conectados"
-        )
+        # Summary (always shows totals, unfiltered)
+        if statuses:
+            online_count = sum(1 for s in statuses.values() if s.is_online)
+            total_users = sum(s.total_sessions for s in statuses.values() if s.is_online)
+            total = len(statuses)
+            self.summary_label.configure(
+                text=f"📊 {total} servidores  |  ✅ {online_count} en línea  |  "
+                     f"❌ {total - online_count} sin conexión  |  👥 {total_users} usuarios"
+            )
+        else:
+            self.summary_label.configure(text="Sin servidores configurados")
 
-        # Update timestamp
         from datetime import datetime
         self.last_update_label.configure(
             text=f"Última actualización: {datetime.now().strftime('%H:%M:%S')}"
         )
+
+        self._apply_filters()
 
     def _create_server_card(self, parent, status: ServerStatus) -> ctk.CTkFrame:
         """Create a single server status card."""
@@ -125,13 +291,11 @@ class DashboardView(ctk.CTkFrame):
         card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=14, height=200)
         card.pack_propagate(False)
 
-        # Make entire card clickable
         def on_click(e, h=status.server.host):
             self.on_server_click(h)
 
         card.bind("<Button-1>", on_click)
 
-        # Card content
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=15, pady=12)
         inner.bind("<Button-1>", on_click)
@@ -151,23 +315,21 @@ class DashboardView(ctk.CTkFrame):
         name_lbl.pack(side="left", padx=(6, 0))
         name_lbl.bind("<Button-1>", on_click)
 
-        # Buttons (edit/delete) at top-right
+        # Edit/delete buttons
         btn_frame = ctk.CTkFrame(top_row, fg_color="transparent")
         btn_frame.pack(side="right")
 
-        edit_btn = ctk.CTkButton(
+        ctk.CTkButton(
             btn_frame, text="✏", width=28, height=28, font=("Segoe UI", 12),
             fg_color="transparent", hover_color=COLORS["bg_card_hover"],
             command=lambda h=status.server.host: self.on_edit_server(h),
-        )
-        edit_btn.pack(side="left", padx=2)
+        ).pack(side="left", padx=2)
 
-        del_btn = ctk.CTkButton(
+        ctk.CTkButton(
             btn_frame, text="🗑", width=28, height=28, font=("Segoe UI", 12),
             fg_color="transparent", hover_color=COLORS["critical"],
             command=lambda h=status.server.host: self.on_delete_server(h),
-        )
-        del_btn.pack(side="left")
+        ).pack(side="left")
 
         # Host IP
         ip_lbl = ctk.CTkLabel(inner, text=status.server.host, font=FONTS["mono"],
@@ -176,7 +338,6 @@ class DashboardView(ctk.CTkFrame):
         ip_lbl.bind("<Button-1>", on_click)
 
         if status.is_online:
-            # Users section
             user_row = ctk.CTkFrame(inner, fg_color="transparent")
             user_row.pack(fill="x")
             user_row.bind("<Button-1>", on_click)
@@ -194,7 +355,6 @@ class DashboardView(ctk.CTkFrame):
             lbl.pack(side="left", pady=(5, 0))
             lbl.bind("<Button-1>", on_click)
 
-            # Metrics bar
             if status.metrics:
                 m = status.metrics
                 metrics_row = ctk.CTkFrame(inner, fg_color="transparent")
@@ -219,7 +379,6 @@ class DashboardView(ctk.CTkFrame):
                     ctk.CTkLabel(item, text=f"{label}: {val:.0f}%", font=FONTS["small_bold"],
                                   text_color=mc).pack()
 
-            # Load indicator
             if load != "normal":
                 load_text = "⚠ SOBRECARGADO" if load == "critical" else "⚠ PRECAUCIÓN"
                 load_color = COLORS["critical"] if load == "critical" else COLORS["warning"]
@@ -228,7 +387,6 @@ class DashboardView(ctk.CTkFrame):
                 load_lbl.pack(anchor="w", pady=(5, 0))
                 load_lbl.bind("<Button-1>", on_click)
         else:
-            # Offline message
             err = status.error_message[:80] if status.error_message else "No se pudo conectar"
             err_lbl = ctk.CTkLabel(inner, text=f"❌ {err}", font=FONTS["small"],
                                     text_color=COLORS["critical"], wraplength=250)
