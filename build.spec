@@ -2,6 +2,20 @@
 """PyInstaller spec file for ServerC."""
 
 import os
+from PIL import Image
+
+# Convert favicon.png to icon.ico — always regenerate
+png_path = os.path.join('assets', 'favicon.png')
+ico_path = os.path.join('assets', 'icon.ico')
+if os.path.exists(png_path):
+    img = Image.open(png_path).convert('RGBA')
+    sizes = [16, 24, 32, 48, 64, 128, 256]
+    imgs = [img.resize((s, s), Image.LANCZOS) for s in sizes]
+    # Largest as base, rest as append
+    imgs[-1].save(ico_path, format='ICO', append_images=imgs[:-1])
+    print(f'  Icono generado: {ico_path} ({os.path.getsize(ico_path)} bytes)')
+
+icon_file = ico_path if os.path.exists(ico_path) else None
 
 block_cipher = None
 
@@ -49,7 +63,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon.ico' if os.path.exists('assets/icon.ico') else None,
+    icon=icon_file,
 )
 
 coll = COLLECT(
