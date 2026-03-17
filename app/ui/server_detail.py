@@ -1,10 +1,42 @@
 """Server detail view — shows sessions and metrics for a single server."""
 
+import re
 import customtkinter as ctk
 from typing import Optional
 
 from app.models import ServerStatus, UserSession
 from app.ui.styles import COLORS, FONTS
+
+
+def _format_idle_time(raw: str) -> str:
+    """Convert quser idle time to human-readable Spanish format.
+    
+    Formats: '.' -> Activo, '10' -> 10 min, '1:07' -> 1h 07m,
+             '3+18:09' -> 3d 18h 09m, 'none' -> Activo
+    """
+    if not raw or raw in (".", "none", "Ninguno"):
+        return "Activo"
+
+    # Days + hours:minutes  e.g. "3+18:09"
+    m = re.match(r"^(\d+)\+(\d+):(\d+)$", raw)
+    if m:
+        d, h, mi = m.groups()
+        return f"{d}d {h}h {mi}m"
+
+    # Hours:minutes  e.g. "1:07"
+    m = re.match(r"^(\d+):(\d+)$", raw)
+    if m:
+        h, mi = m.groups()
+        return f"{h}h {mi}m"
+
+    # Just minutes  e.g. "10"
+    if raw.isdigit():
+        mins = int(raw)
+        if mins >= 60:
+            return f"{mins // 60}h {mins % 60:02d}m"
+        return f"{mins} min"
+
+    return raw
 
 
 class ServerDetailView(ctk.CTkFrame):
@@ -199,7 +231,7 @@ class ServerDetailView(ctk.CTkFrame):
                 (s.username, COLORS["text_primary"], FONTS["body_bold"]),
                 (s.session_id, COLORS["text_secondary"], FONTS["mono"]),
                 (s.state, state_color, FONTS["small_bold"]),
-                (s.idle_time or "—", COLORS["text_secondary"], FONTS["mono"]),
+                (_format_idle_time(s.idle_time), COLORS["text_secondary"], FONTS["mono"]),
                 (s.client_name or "—", COLORS["text_secondary"], FONTS["body"]),
                 (s.logon_time, COLORS["text_secondary"], FONTS["small"]),
             ]
