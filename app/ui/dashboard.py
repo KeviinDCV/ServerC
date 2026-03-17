@@ -276,6 +276,25 @@ class DashboardView(ctk.CTkFrame):
 
         self._apply_filters()
 
+    def update_single(self, host: str, status: ServerStatus):
+        """Update a single server status incrementally (called as results arrive)."""
+        self._all_statuses[host] = status
+        # Refresh summary counts
+        statuses = self._all_statuses
+        online_count = sum(1 for s in statuses.values() if s.is_online)
+        total_users = sum(s.total_sessions for s in statuses.values() if s.is_online)
+        total = len(statuses)
+        self.summary_label.configure(
+            text=f"📊 {total} servidores  |  ✅ {online_count} en línea  |  "
+                 f"❌ {total - online_count} sin conexión  |  👥 {total_users} usuarios"
+        )
+        from datetime import datetime
+        self.last_update_label.configure(
+            text=f"Última actualización: {datetime.now().strftime('%H:%M:%S')}"
+        )
+        # Re-render with filters
+        self._apply_filters()
+
     def _create_server_card(self, parent, status: ServerStatus) -> ctk.CTkFrame:
         """Create a single server status card."""
         load = status.load_level

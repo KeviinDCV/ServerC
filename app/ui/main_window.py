@@ -2,6 +2,7 @@
 
 import customtkinter as ctk
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 from collections import OrderedDict
 
@@ -18,6 +19,7 @@ class MainWindow(ctk.CTk):
     """Main application window."""
 
     POLL_INTERVAL_MS = 30_000  # 30 seconds
+    MAX_WORKERS = 15  # parallel WinRM queries
 
     def __init__(self):
         super().__init__()
@@ -68,11 +70,23 @@ class MainWindow(ctk.CTk):
         )
         self.detail_view = ServerDetailView(self, on_back=self._show_dashboard)
 
+        # Show servers immediately (before polling) as "Loading" cards
+        self._init_statuses()
+
         self._show_dashboard()
         self._start_polling()
 
         # Graceful shutdown
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _init_statuses(self):
+        """Create placeholder statuses so dashboard shows all servers immediately."""
+        for server in self.servers:
+            self.statuses[server.host] = ServerStatus(
+                server=server,
+                is_online=False,
+                error_message="Consultando servidor...",
+            )
 
     # --- Navigation ---
 
@@ -133,20 +147,50 @@ class MainWindow(ctk.CTk):
         self._poll_once()
 
     def _poll_once(self):
-        """Query all servers in a background thread, then schedule next poll."""
+        """Query all servers in parallel using a thread pool, then schedule next poll."""
         if not self._polling:
             return
 
+        servers_snapshot = list(self.servers)
+
         def _work():
             new_statuses = OrderedDict()
-            for server in self.servers:
-                status = query_server(server)
-                new_statuses[server.host] = status
+            # Pre-fill in order so dict keeps server list order
+            for server in servers_snapshot:
+                new_statuses[server.host] = None
+
+            def _query_one(server):
+                try:
+                    return server.host, query_server(server)
+                except Exception as e:
+                    return server.host, ServerStatus(
+                        server=server, is_online=False,
+                        error_message=str(e),
+                    )
+
+            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
+                futures = {pool.submit(_query_one, s): s for s in servers_snapshot}
+                for future in as_completed(futures):
+                    if not self._polling:
+                        return
+                    host, status = future.result()
+                    new_statuses[host] = status
+                    # Push incremental update to UI
+                    if self._polling:
+                        self.after(0, lambda h=host, st=status: self._on_single_update(h, st))
 
             if self._polling:
                 self.after(0, lambda: self._on_poll_complete(new_statuses))
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _on_single_update(self, host: str, status: ServerStatus):
+        """Update a single server's status in real time as results arrive."""
+        self.statuses[host] = status
+        if self.selected_host == host:
+            self.detail_view.update_status(status)
+        elif not self.selected_host:
+            self.dashboard.update_single(host, status)
 
     def _on_poll_complete(self, new_statuses: Dict[str, ServerStatus]):
         """Called on main thread when polling completes."""
