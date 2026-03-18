@@ -20,6 +20,7 @@ class MainWindow(ctk.CTk):
 
     POLL_INTERVAL_MS = 30_000  # 30 seconds
     MAX_WORKERS = 15  # parallel WinRM queries
+    _DEBOUNCE_MS = 1000  # batch UI updates to at most once per second
 
     def __init__(self):
         super().__init__()
@@ -59,6 +60,9 @@ class MainWindow(ctk.CTk):
         self.selected_host: Optional[str] = None
         self._polling = True
         self._poll_job = None
+        self._debounce_job = None
+        self._pending_count = 0
+        self._total_servers = len(self.servers)
 
         # Build views
         self.dashboard = DashboardView(
@@ -175,34 +179,54 @@ class MainWindow(ctk.CTk):
                         return
                     host, status = future.result()
                     new_statuses[host] = status
-                    # Push incremental update to UI
+                    # Quietly update the status dict; debounce the UI refresh
                     if self._polling:
-                        self.after(0, lambda h=host, st=status: self._on_single_update(h, st))
+                        self.after(0, lambda h=host, st=status: self._on_result_arrived(h, st))
 
             if self._polling:
                 self.after(0, lambda: self._on_poll_complete(new_statuses))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _on_single_update(self, host: str, status: ServerStatus):
-        """Update a single server's status in real time as results arrive."""
+    def _on_result_arrived(self, host: str, status: ServerStatus):
+        """Store one result and schedule a debounced UI refresh."""
         self.statuses[host] = status
+        self._pending_count += 1
+
+        # If detail view is open for this specific server, update immediately (cheap)
         if self.selected_host == host:
             self.detail_view.update_status(status)
-        elif not self.selected_host:
-            self.dashboard.update_single(host, status)
+            return
+
+        # Update progress text cheaply (no re-render)
+        if not self.selected_host:
+            self.dashboard.update_progress(self._pending_count, self._total_servers)
+
+        # Schedule a batched dashboard refresh (debounced)
+        if self._debounce_job is None:
+            self._debounce_job = self.after(self._DEBOUNCE_MS, self._flush_dashboard)
+
+    def _flush_dashboard(self):
+        """Actually push accumulated status changes to the dashboard."""
+        self._debounce_job = None
+        if not self.selected_host:
+            self.dashboard.update_all(self.statuses)
 
     def _on_poll_complete(self, new_statuses: Dict[str, ServerStatus]):
         """Called on main thread when polling completes."""
         self.statuses = new_statuses
+        self._pending_count = 0
+
+        # Cancel any pending debounce — we'll do the final render now
+        if self._debounce_job is not None:
+            self.after_cancel(self._debounce_job)
+            self._debounce_job = None
 
         if self.selected_host:
-            # Update detail view
             status = self.statuses.get(self.selected_host)
             if status:
                 self.detail_view.update_status(status)
         else:
-            # Update dashboard
             self.dashboard.update_all(self.statuses)
 
         # Schedule next poll
@@ -214,6 +238,13 @@ class MainWindow(ctk.CTk):
         if self._poll_job:
             self.after_cancel(self._poll_job)
             self._poll_job = None
+        if self._debounce_job is not None:
+            self.after_cancel(self._debounce_job)
+            self._debounce_job = None
+        self._pending_count = 0
+        self._init_statuses()
+        if not self.selected_host:
+            self.dashboard.update_all(self.statuses)
         self._poll_once()
 
     # --- Cleanup ---
@@ -222,4 +253,6 @@ class MainWindow(ctk.CTk):
         self._polling = False
         if self._poll_job:
             self.after_cancel(self._poll_job)
+        if self._debounce_job is not None:
+            self.after_cancel(self._debounce_job)
         self.destroy()
