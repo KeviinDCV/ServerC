@@ -96,6 +96,8 @@ a = Analysis(
         'xmltodict',
         'cryptography',
         'customtkinter',
+        'win10toast',
+        'sqlite3',
     ],
     hookspath=[],
     hooksconfig={},

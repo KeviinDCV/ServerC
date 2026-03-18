@@ -8,12 +8,15 @@ Performance design:
 """
 
 import customtkinter as ctk
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Callable
 from collections import Counter
 from dataclasses import dataclass, field
 
 from app.models import ServerStatus
 from app.ui.styles import COLORS, FONTS
+from app.ui.summary_panel import SummaryPanel
+from app.ui.table_view import TableView
+from app.ui.sparkline import Sparkline
 
 
 # ── Per-card widget references for in-place updates ──────────────────────────
@@ -28,6 +31,10 @@ class _CardWidgets:
     ip_lbl: ctk.CTkLabel
     # Dynamic area — a frame whose children change
     body: ctk.CTkFrame
+    # Sparklines for metric history
+    spark_cpu: Optional[Sparkline] = None
+    spark_ram: Optional[Sparkline] = None
+    spark_frame: Optional[ctk.CTkFrame] = None
     # Cached last-rendered signature so we can skip no-op redraws
     _sig: str = ""
 
@@ -35,12 +42,14 @@ class _CardWidgets:
 class DashboardView(ctk.CTkFrame):
     """Main dashboard showing all servers as status cards with filtering."""
 
-    def __init__(self, parent, on_server_click, on_add_server, on_edit_server, on_delete_server):
+    def __init__(self, parent, on_server_click, on_add_server, on_edit_server,
+                 on_delete_server, on_export=None):
         super().__init__(parent, fg_color=COLORS["bg_dark"])
         self.on_server_click = on_server_click
         self.on_add_server = on_add_server
         self.on_edit_server = on_edit_server
         self.on_delete_server = on_delete_server
+        self.on_export = on_export
 
         # Card pool — keyed by host, created once, never destroyed
         self._card_pool: Dict[str, _CardWidgets] = {}
@@ -50,6 +59,9 @@ class DashboardView(ctk.CTkFrame):
         self._active_filters: Dict[str, str] = {}
         self._empty_label: Optional[ctk.CTkLabel] = None
         self._prev_layout_key: str = ""  # tracks when grid needs rebuild
+        self._view_mode = "cards"  # "cards" or "table"
+        self._spark_data: Dict[str, Dict[str, List[float]]] = {}  # host -> {cpu: [...], ram: [...]}
+        self._alerts: List[Dict] = []
 
         self._build_ui()
 
@@ -66,13 +78,27 @@ class DashboardView(ctk.CTkFrame):
         ctk.CTkLabel(header, text="🖥  ServerC Monitor HUV", font=FONTS["title"],
                       text_color=COLORS["text_primary"]).pack(side="left")
 
+        # Right side buttons
+        btn_row = ctk.CTkFrame(header, fg_color="transparent")
+        btn_row.pack(side="right")
+
         ctk.CTkButton(
-            header, text="＋ Agregar Servidor", font=FONTS["body_bold"],
+            btn_row, text="📥 Exportar", font=FONTS["small_bold"],
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            height=34, width=100, command=self._do_export,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_row, text="＋ Agregar Servidor", font=FONTS["body_bold"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             height=38, width=180, command=self.on_add_server,
-        ).pack(side="right")
+        ).pack(side="left")
 
-        # ─── Search + Grid Size row ───
+        # ─── Executive Summary Panel ───
+        self.summary_panel = SummaryPanel(self)
+        self.summary_panel.pack(fill="x", padx=20, pady=(5, 5))
+
+        # ─── Search + View toggle + Grid Size row ───
         search_row = ctk.CTkFrame(self, fg_color="transparent")
         search_row.pack(fill="x", padx=20, pady=(5, 3))
 
@@ -84,12 +110,23 @@ class DashboardView(ctk.CTkFrame):
             height=38, font=FONTS["body"], width=400, corner_radius=10,
         ).pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        grid_frame = ctk.CTkFrame(search_row, fg_color="transparent")
-        grid_frame.pack(side="right")
-        ctk.CTkLabel(grid_frame, text="Grid:", font=FONTS["small_bold"],
+        right_controls = ctk.CTkFrame(search_row, fg_color="transparent")
+        right_controls.pack(side="right")
+
+        # View toggle: Cards / Table
+        ctk.CTkLabel(right_controls, text="Vista:", font=FONTS["small_bold"],
+                      text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 5))
+        self._view_toggle = ctk.CTkSegmentedButton(
+            right_controls, values=["🃏 Cards", "📋 Tabla"],
+            command=self._on_view_toggle, font=FONTS["small_bold"], height=32,
+        )
+        self._view_toggle.set("🃏 Cards")
+        self._view_toggle.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(right_controls, text="Grid:", font=FONTS["small_bold"],
                       text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 5))
         self.grid_selector = ctk.CTkSegmentedButton(
-            grid_frame, values=["5", "4", "3", "2"],
+            right_controls, values=["5", "4", "3", "2"],
             command=self._on_grid_change, font=FONTS["small_bold"], height=32,
         )
         self.grid_selector.set("3")
@@ -131,40 +168,56 @@ class DashboardView(ctk.CTkFrame):
             command=lambda: self._filter_canvas.xview_scroll(3, "units"),
         )
 
-        # ─── Summary bar ───
-        self.summary_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=10, height=40)
-        self.summary_frame.pack(fill="x", padx=20, pady=(3, 8))
+        # ─── Status bar (compact, below filters) ───
+        self.summary_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=10, height=36)
+        self.summary_frame.pack(fill="x", padx=20, pady=(3, 4))
         self.summary_frame.pack_propagate(False)
-
-        self.summary_label = ctk.CTkLabel(
-            self.summary_frame, text="Cargando servidores...",
-            font=FONTS["body"], text_color=COLORS["text_secondary"],
-        )
-        self.summary_label.pack(side="left", padx=15)
 
         self.filter_info_label = ctk.CTkLabel(
             self.summary_frame, text="",
             font=FONTS["small"], text_color=COLORS["accent"],
         )
-        self.filter_info_label.pack(side="left", padx=5)
+        self.filter_info_label.pack(side="left", padx=15)
 
         self.last_update_label = ctk.CTkLabel(
-            self.summary_frame, text="",
+            self.summary_frame, text="Cargando servidores...",
             font=FONTS["small"], text_color=COLORS["text_muted"],
         )
         self.last_update_label.pack(side="right", padx=15)
 
-        # ─── Scrollable grid area ───
-        self.grid_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        # ─── Content area: cards grid + table (only one visible at a time) ───
+        self._content_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._content_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+        self.grid_scroll = ctk.CTkScrollableFrame(self._content_frame, fg_color="transparent")
         self.grid_scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
+        self._table_view = TableView(self._content_frame, on_server_click=self.on_server_click)
+        # table is hidden initially
+
     # ──────────────────────────────────────────────────────────────────────────
-    # Grid size
+    # View toggle + Grid size
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _on_view_toggle(self, value: str):
+        if "Tabla" in value:
+            self._view_mode = "table"
+            self.grid_scroll.pack_forget()
+            self._table_view.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            self._table_view.update_all(self._all_statuses, self._visible_hosts)
+        else:
+            self._view_mode = "cards"
+            self._table_view.pack_forget()
+            self.grid_scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+            self._relayout()
 
     def _on_grid_change(self, value: str):
         self._cols = int(value)
         self._relayout()
+
+    def _do_export(self):
+        if self.on_export:
+            self.on_export()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Filter logic
@@ -295,7 +348,7 @@ class DashboardView(ctk.CTkFrame):
             return None  # shouldn't happen
 
         card = ctk.CTkFrame(self.grid_scroll, fg_color=COLORS["bg_card"],
-                            corner_radius=14, height=200)
+                            corner_radius=14, height=240)
         card.pack_propagate(False)
 
         def on_click(e, h=host):
@@ -344,8 +397,28 @@ class DashboardView(ctk.CTkFrame):
         body.pack(fill="both", expand=True)
         body.bind("<Button-1>", on_click)
 
+        # Sparkline area for metric history
+        spark_frame = ctk.CTkFrame(inner, fg_color="transparent", height=36)
+        spark_frame.pack(fill="x", pady=(4, 0))
+        spark_frame.pack_propagate(False)
+        spark_frame.bind("<Button-1>", on_click)
+
+        spark_cpu = Sparkline(spark_frame, width=80, height=30,
+                              line_color=COLORS["accent"])
+        spark_cpu.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(spark_frame, text="CPU", font=("Segoe UI", 8),
+                      text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 8))
+
+        spark_ram = Sparkline(spark_frame, width=80, height=30,
+                              line_color=COLORS["warning"])
+        spark_ram.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(spark_frame, text="RAM", font=("Segoe UI", 8),
+                      text_color=COLORS["text_muted"]).pack(side="left")
+
         cw = _CardWidgets(frame=card, dot=dot, name_lbl=name_lbl,
-                          ip_lbl=ip_lbl, body=body)
+                          ip_lbl=ip_lbl, body=body,
+                          spark_cpu=spark_cpu, spark_ram=spark_ram,
+                          spark_frame=spark_frame)
         self._card_pool[host] = cw
 
         # Initial content
@@ -517,9 +590,18 @@ class DashboardView(ctk.CTkFrame):
         for host in visible:
             cw = self._ensure_card(host)
             self._update_card_body(host, cw)
+            # Feed sparklines if data available
+            sdata = self._spark_data.get(host)
+            if sdata and cw.spark_cpu and cw.spark_ram:
+                cw.spark_cpu.set_data(sdata.get("cpu", []))
+                cw.spark_ram.set_data(sdata.get("ram", []))
 
         if need_relayout:
             self._relayout()
+
+        # Also update table view if active
+        if self._view_mode == "table":
+            self._table_view.update_all(statuses, visible)
 
         total = len(statuses)
         shown = len(visible)
@@ -531,18 +613,21 @@ class DashboardView(ctk.CTkFrame):
         self.last_update_label.configure(text=f"Consultando {done}/{total}...")
 
     def _update_summary(self):
+        """Update the executive summary panel and the compact status bar."""
         statuses = self._all_statuses
-        if statuses:
-            online = sum(1 for s in statuses.values() if s.is_online)
-            users = sum(s.total_sessions for s in statuses.values() if s.is_online)
-            total = len(statuses)
-            self.summary_label.configure(
-                text=f"📊 {total} servidores  |  ✅ {online} en línea  |  "
-                     f"❌ {total - online} sin conexión  |  👥 {users} usuarios"
-            )
-        else:
-            self.summary_label.configure(text="Sin servidores configurados")
+        self.summary_panel.update(statuses, self._alerts)
         from datetime import datetime
         self.last_update_label.configure(
             text=f"Última actualización: {datetime.now().strftime('%H:%M:%S')}"
         )
+
+    def set_spark_data(self, data: Dict[str, Dict[str, List[float]]]):
+        """Provide sparkline history data. Called by MainWindow.
+
+        data = {host: {"cpu": [v1, v2, ...], "ram": [v1, v2, ...]}}.
+        """
+        self._spark_data = data
+
+    def set_alerts(self, alerts: List[Dict]):
+        """Provide recent alerts for the summary panel ticker."""
+        self._alerts = alerts

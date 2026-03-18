@@ -13,6 +13,9 @@ from app.ui.styles import COLORS
 from app.ui.dashboard import DashboardView
 from app.ui.server_detail import ServerDetailView
 from app.ui.add_server import AddServerDialog
+from app.history import record_statuses, get_series, purge_old, close as close_history
+from app.alerts import AlertManager
+from app.export import export_csv
 
 
 class MainWindow(ctk.CTk):
@@ -63,6 +66,8 @@ class MainWindow(ctk.CTk):
         self._debounce_job = None
         self._pending_count = 0
         self._total_servers = len(self.servers)
+        self._alert_mgr = AlertManager()
+        self._purge_counter = 0  # purge old history every N polls
 
         # Build views
         self.dashboard = DashboardView(
@@ -71,6 +76,7 @@ class MainWindow(ctk.CTk):
             on_add_server=self._on_add_server,
             on_edit_server=self._on_edit_server,
             on_delete_server=self._on_delete_server,
+            on_export=self._on_export,
         )
         self.detail_view = ServerDetailView(self, on_back=self._show_dashboard)
 
@@ -222,12 +228,62 @@ class MainWindow(ctk.CTk):
             self.after_cancel(self._debounce_job)
             self._debounce_job = None
 
+        # Record history & check alerts in background
+        threading.Thread(target=self._record_and_alert, args=(dict(new_statuses),),
+                         daemon=True).start()
+
+        # Feed sparkline data to dashboard
+        self._feed_sparklines()
+
         if self.selected_host:
             status = self.statuses.get(self.selected_host)
             if status:
                 self.detail_view.update_status(status)
         else:
             self.dashboard.update_all(self.statuses)
+
+        # Schedule next poll
+        if self._polling:
+            self._poll_job = self.after(self.POLL_INTERVAL_MS, self._poll_once)
+
+    def _record_and_alert(self, statuses: Dict[str, ServerStatus]):
+        """Background: write history + evaluate alerts."""
+        try:
+            record_statuses(statuses)
+            alerts = self._alert_mgr.check(statuses)
+            # Feed alerts to dashboard on main thread
+            if alerts or self._alert_mgr.alerts_log:
+                self.after(0, lambda: self.dashboard.set_alerts(
+                    self._alert_mgr.get_recent(50)))
+        except Exception:
+            pass
+        # Periodic purge (every ~20 polls = ~10 min)
+        self._purge_counter += 1
+        if self._purge_counter >= 20:
+            self._purge_counter = 0
+            try:
+                purge_old(24)
+            except Exception:
+                pass
+
+    def _feed_sparklines(self):
+        """Build sparkline data dict from history and push to dashboard."""
+        try:
+            spark = {}
+            for host in self.statuses:
+                cpu_data = get_series(host, "cpu", minutes=30)
+                ram_data = get_series(host, "ram", minutes=30)
+                spark[host] = {
+                    "cpu": [v for _, v in cpu_data if v is not None],
+                    "ram": [v for _, v in ram_data if v is not None],
+                }
+            self.dashboard.set_spark_data(spark)
+        except Exception:
+            pass
+
+    def _on_export(self):
+        """Export current server data to CSV."""
+        export_csv(self.statuses, parent_window=self)
 
         # Schedule next poll
         if self._polling:
@@ -255,4 +311,5 @@ class MainWindow(ctk.CTk):
             self.after_cancel(self._poll_job)
         if self._debounce_job is not None:
             self.after_cancel(self._debounce_job)
+        close_history()
         self.destroy()
