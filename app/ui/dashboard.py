@@ -69,9 +69,45 @@ class DashboardView(ctk.CTkFrame):
         self.grid_selector.set("3")
         self.grid_selector.pack(side="left")
 
-        # ─── Filter chips row ───
-        self.filter_row = ctk.CTkFrame(self, fg_color="transparent")
-        self.filter_row.pack(fill="x", padx=20, pady=(3, 3))
+        # ─── Filter chips row (scrollable) ───
+        self._filter_outer = ctk.CTkFrame(self, fg_color="transparent", height=38)
+        self._filter_outer.pack(fill="x", padx=20, pady=(3, 3))
+        self._filter_outer.pack_propagate(False)
+
+        self._filter_canvas = ctk.CTkCanvas(
+            self._filter_outer, highlightthickness=0,
+            bg=self._apply_appearance_mode(COLORS["bg_dark"]),
+            height=36,
+        )
+        self._filter_canvas.pack(side="left", fill="both", expand=True)
+
+        self.filter_row = ctk.CTkFrame(self._filter_canvas, fg_color="transparent")
+        self._filter_window = self._filter_canvas.create_window((0, 0), window=self.filter_row, anchor="nw")
+
+        self.filter_row.bind("<Configure>", lambda e: self._filter_canvas.configure(
+            scrollregion=self._filter_canvas.bbox("all")))
+
+        # Mouse wheel horizontal scroll on filter area
+        def _on_filter_scroll(event):
+            self._filter_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._filter_canvas.bind("<MouseWheel>", _on_filter_scroll)
+        self.filter_row.bind("<MouseWheel>", _on_filter_scroll)
+
+        # Scroll arrows
+        self._scroll_left_btn = ctk.CTkButton(
+            self._filter_outer, text="◀", width=24, height=28,
+            font=("Segoe UI", 11), corner_radius=6,
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_muted"],
+            command=lambda: self._filter_canvas.xview_scroll(-3, "units"),
+        )
+        self._scroll_right_btn = ctk.CTkButton(
+            self._filter_outer, text="▶", width=24, height=28,
+            font=("Segoe UI", 11), corner_radius=6,
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_muted"],
+            command=lambda: self._filter_canvas.xview_scroll(3, "units"),
+        )
 
         # ─── Summary bar ───
         self.summary_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_medium"], corner_radius=10, height=40)
@@ -122,6 +158,8 @@ class DashboardView(ctk.CTkFrame):
         statuses = self._all_statuses
 
         if not statuses:
+            self._scroll_left_btn.pack_forget()
+            self._scroll_right_btn.pack_forget()
             return
 
         # "Todos" chip (clear filters)
@@ -146,11 +184,22 @@ class DashboardView(ctk.CTkFrame):
                             text_color=COLORS["text_muted"])
         sep.pack(side="left", padx=6)
 
-        # Name group filters (servers that share a name)
+        # Name group filters — ALL groups, no limit
         groups = self._get_unique_names()
-        for name in groups[:8]:  # limit to 8 group chips
+        for name in groups:
             count = sum(1 for s in statuses.values() if s.server.name == name)
             self._add_chip(f"{name} ({count})", "group", name)
+
+        # Show/hide scroll arrows based on content overflow
+        self.filter_row.update_idletasks()
+        content_width = self.filter_row.winfo_reqwidth()
+        canvas_width = self._filter_canvas.winfo_width()
+        if content_width > canvas_width and canvas_width > 1:
+            self._scroll_left_btn.pack(side="left", padx=(4, 0))
+            self._scroll_right_btn.pack(side="right", padx=(0, 0))
+        else:
+            self._scroll_left_btn.pack_forget()
+            self._scroll_right_btn.pack_forget()
 
     def _add_chip(self, text: str, filter_type: str, value: str, is_clear: bool = False):
         is_active = (not self._active_filters and is_clear) or \
@@ -167,6 +216,9 @@ class DashboardView(ctk.CTkFrame):
             command=lambda: self._toggle_filter(filter_type, value, is_clear),
         )
         btn.pack(side="left", padx=2)
+        # Propagate mouse wheel to canvas for scrolling
+        btn.bind("<MouseWheel>", lambda e: self._filter_canvas.xview_scroll(
+            int(-1 * (e.delta / 120)), "units"))
 
     def _toggle_filter(self, filter_type: str, value: str, is_clear: bool):
         if is_clear:
