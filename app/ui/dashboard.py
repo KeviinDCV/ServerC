@@ -7,6 +7,7 @@ Performance design:
 - Summary bar is a simple .configure() call — no widget churn.
 """
 
+import logging
 import customtkinter as ctk
 from typing import Dict, List, Optional, Set, Callable
 from collections import Counter
@@ -17,6 +18,8 @@ from app.ui.styles import COLORS, FONTS
 from app.ui.summary_panel import SummaryPanel
 from app.ui.table_view import TableView
 from app.ui.sparkline import Sparkline
+
+log = logging.getLogger(__name__)
 
 
 # ── Per-card widget references for in-place updates ──────────────────────────
@@ -398,22 +401,23 @@ class DashboardView(ctk.CTkFrame):
         body.bind("<Button-1>", on_click)
 
         # Sparkline area for metric history
-        spark_frame = ctk.CTkFrame(inner, fg_color="transparent", height=36)
+        spark_frame = ctk.CTkFrame(inner, fg_color=COLORS["bg_card"], height=36,
+                                    corner_radius=6)
         spark_frame.pack(fill="x", pady=(4, 0))
         spark_frame.pack_propagate(False)
         spark_frame.bind("<Button-1>", on_click)
 
         spark_cpu = Sparkline(spark_frame, width=80, height=30,
                               line_color=COLORS["accent"])
-        spark_cpu.pack(side="left", padx=(0, 4))
+        spark_cpu.pack(side="left", padx=(4, 0))
         ctk.CTkLabel(spark_frame, text="CPU", font=("Segoe UI", 8),
-                      text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 8))
+                      text_color=COLORS["text_muted"]).pack(side="left", padx=(2, 8))
 
         spark_ram = Sparkline(spark_frame, width=80, height=30,
                               line_color=COLORS["warning"])
-        spark_ram.pack(side="left", padx=(0, 4))
+        spark_ram.pack(side="left")
         ctk.CTkLabel(spark_frame, text="RAM", font=("Segoe UI", 8),
-                      text_color=COLORS["text_muted"]).pack(side="left")
+                      text_color=COLORS["text_muted"]).pack(side="left", padx=(2, 0))
 
         cw = _CardWidgets(frame=card, dot=dot, name_lbl=name_lbl,
                           ip_lbl=ip_lbl, body=body,
@@ -570,9 +574,18 @@ class DashboardView(ctk.CTkFrame):
 
     def update_all(self, statuses: Dict[str, ServerStatus]):
         """Full refresh: update data, chips, summary, cards, layout."""
+        log.debug("update_all called with %d statuses", len(statuses))
         self._all_statuses = statuses
-        self._update_summary()
-        self._build_filter_chips()
+
+        try:
+            self._update_summary()
+        except Exception:
+            log.exception("Error in _update_summary")
+
+        try:
+            self._build_filter_chips()
+        except Exception:
+            log.exception("Error in _build_filter_chips")
 
         # Remove cards for deleted servers
         stale = set(self._card_pool) - set(statuses)
@@ -588,20 +601,26 @@ class DashboardView(ctk.CTkFrame):
 
         # Update card data in-place (cheap .configure() per card)
         for host in visible:
-            cw = self._ensure_card(host)
-            self._update_card_body(host, cw)
-            # Feed sparklines if data available
-            sdata = self._spark_data.get(host)
-            if sdata and cw.spark_cpu and cw.spark_ram:
-                cw.spark_cpu.set_data(sdata.get("cpu", []))
-                cw.spark_ram.set_data(sdata.get("ram", []))
+            try:
+                cw = self._ensure_card(host)
+                self._update_card_body(host, cw)
+                # Feed sparklines if data available
+                sdata = self._spark_data.get(host)
+                if sdata and cw.spark_cpu and cw.spark_ram:
+                    cw.spark_cpu.set_data(sdata.get("cpu", []))
+                    cw.spark_ram.set_data(sdata.get("ram", []))
+            except Exception:
+                log.exception("Error updating card for %s", host)
 
         if need_relayout:
             self._relayout()
 
         # Also update table view if active
-        if self._view_mode == "table":
-            self._table_view.update_all(statuses, visible)
+        try:
+            if self._view_mode == "table":
+                self._table_view.update_all(statuses, visible)
+        except Exception:
+            log.exception("Error updating table view")
 
         total = len(statuses)
         shown = len(visible)

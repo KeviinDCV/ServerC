@@ -2,6 +2,8 @@
 
 import customtkinter as ctk
 import threading
+import logging
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 from collections import OrderedDict
@@ -16,6 +18,8 @@ from app.ui.add_server import AddServerDialog
 from app.history import record_statuses, get_series, purge_old, close as close_history
 from app.alerts import AlertManager
 from app.export import export_csv
+
+log = logging.getLogger(__name__)
 
 
 class MainWindow(ctk.CTk):
@@ -68,6 +72,7 @@ class MainWindow(ctk.CTk):
         self._total_servers = len(self.servers)
         self._alert_mgr = AlertManager()
         self._purge_counter = 0  # purge old history every N polls
+        self._ui_queue: queue.Queue = queue.Queue()  # thread-safe queue for bg→main thread
 
         # Build views
         self.dashboard = DashboardView(
@@ -85,6 +90,7 @@ class MainWindow(ctk.CTk):
 
         self._show_dashboard()
         self._start_polling()
+        self._drain_ui_queue()  # start draining the thread-safe queue
 
         # Graceful shutdown
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -152,6 +158,21 @@ class MainWindow(ctk.CTk):
 
     # --- Polling ---
 
+    def _drain_ui_queue(self):
+        """Process all pending callbacks from background threads (runs on main thread)."""
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    log.exception("Error executing queued UI callback")
+        except queue.Empty:
+            pass
+        # Re-schedule self every 100ms
+        if self._polling:
+            self.after(100, self._drain_ui_queue)
+
     def _start_polling(self):
         """Start background polling of all servers."""
         self._poll_once()
@@ -161,6 +182,7 @@ class MainWindow(ctk.CTk):
         if not self._polling:
             return
 
+        log.info("Starting poll cycle for %d servers", len(self.servers))
         servers_snapshot = list(self.servers)
 
         def _work():
@@ -185,78 +207,104 @@ class MainWindow(ctk.CTk):
                         return
                     host, status = future.result()
                     new_statuses[host] = status
-                    # Quietly update the status dict; debounce the UI refresh
+                    # Queue UI update on the main thread via the thread-safe queue
                     if self._polling:
-                        self.after(0, lambda h=host, st=status: self._on_result_arrived(h, st))
+                        self._ui_queue.put(lambda h=host, st=status: self._on_result_arrived(h, st))
 
             if self._polling:
-                self.after(0, lambda: self._on_poll_complete(new_statuses))
+                self._ui_queue.put(lambda: self._on_poll_complete(new_statuses))
 
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_result_arrived(self, host: str, status: ServerStatus):
         """Store one result and schedule a debounced UI refresh."""
-        self.statuses[host] = status
-        self._pending_count += 1
+        try:
+            self.statuses[host] = status
+            self._pending_count += 1
+            log.debug("Result: %s online=%s", host, status.is_online)
 
-        # If detail view is open for this specific server, update immediately (cheap)
-        if self.selected_host == host:
-            self.detail_view.update_status(status)
-            return
+            # If detail view is open for this specific server, update immediately (cheap)
+            if self.selected_host == host:
+                self.detail_view.update_status(status)
+                return
 
-        # Update progress text cheaply (no re-render)
-        if not self.selected_host:
-            self.dashboard.update_progress(self._pending_count, self._total_servers)
+            # Update progress text cheaply (no re-render)
+            if not self.selected_host:
+                self.dashboard.update_progress(self._pending_count, self._total_servers)
 
-        # Schedule a batched dashboard refresh (debounced)
-        if self._debounce_job is None:
-            self._debounce_job = self.after(self._DEBOUNCE_MS, self._flush_dashboard)
+            # Schedule a batched dashboard refresh (debounced)
+            if self._debounce_job is None:
+                self._debounce_job = self.after(self._DEBOUNCE_MS, self._flush_dashboard)
+        except Exception:
+            log.exception("Error in _on_result_arrived for %s", host)
 
     def _flush_dashboard(self):
         """Actually push accumulated status changes to the dashboard."""
         self._debounce_job = None
-        if not self.selected_host:
-            self.dashboard.update_all(self.statuses)
+        try:
+            if not self.selected_host:
+                log.debug("Flushing dashboard with %d statuses", len(self.statuses))
+                self.dashboard.update_all(self.statuses)
+        except Exception:
+            log.exception("Error in _flush_dashboard")
 
     def _on_poll_complete(self, new_statuses: Dict[str, ServerStatus]):
         """Called on main thread when polling completes."""
         self.statuses = new_statuses
         self._pending_count = 0
+        log.info("Poll complete: %d servers, %d online",
+                 len(new_statuses),
+                 sum(1 for s in new_statuses.values() if s.is_online))
 
         # Cancel any pending debounce — we'll do the final render now
         if self._debounce_job is not None:
             self.after_cancel(self._debounce_job)
             self._debounce_job = None
 
-        # Record history & check alerts in background
-        threading.Thread(target=self._record_and_alert, args=(dict(new_statuses),),
+        # Record history, check alerts, and build sparkline data in background
+        threading.Thread(target=self._post_poll_work, args=(dict(new_statuses),),
                          daemon=True).start()
 
-        # Feed sparkline data to dashboard
-        self._feed_sparklines()
-
-        if self.selected_host:
-            status = self.statuses.get(self.selected_host)
-            if status:
-                self.detail_view.update_status(status)
-        else:
-            self.dashboard.update_all(self.statuses)
+        try:
+            if self.selected_host:
+                status = self.statuses.get(self.selected_host)
+                if status:
+                    self.detail_view.update_status(status)
+            else:
+                self.dashboard.update_all(self.statuses)
+        except Exception:
+            log.exception("Error in _on_poll_complete UI update")
 
         # Schedule next poll
         if self._polling:
             self._poll_job = self.after(self.POLL_INTERVAL_MS, self._poll_once)
 
-    def _record_and_alert(self, statuses: Dict[str, ServerStatus]):
-        """Background: write history + evaluate alerts."""
+    def _post_poll_work(self, statuses: Dict[str, ServerStatus]):
+        """Background: record history, evaluate alerts, build sparklines."""
+        log.debug("_post_poll_work starting with %d statuses", len(statuses))
         try:
             record_statuses(statuses)
-            alerts = self._alert_mgr.check(statuses)
-            # Feed alerts to dashboard on main thread
-            if alerts or self._alert_mgr.alerts_log:
-                self.after(0, lambda: self.dashboard.set_alerts(
-                    self._alert_mgr.get_recent(50)))
         except Exception:
-            pass
+            log.exception("Error in record_statuses")
+        try:
+            alerts = self._alert_mgr.check(statuses)
+            if alerts or self._alert_mgr.alerts_log:
+                recent = self._alert_mgr.get_recent(50)
+                self._ui_queue.put(lambda: self.dashboard.set_alerts(recent))
+        except Exception:
+            log.exception("Error in alert check")
+        try:
+            spark = {}
+            for host in statuses:
+                cpu_data = get_series(host, "cpu", minutes=30)
+                ram_data = get_series(host, "ram", minutes=30)
+                spark[host] = {
+                    "cpu": [v for _, v in cpu_data if v is not None],
+                    "ram": [v for _, v in ram_data if v is not None],
+                }
+            self._ui_queue.put(lambda s=spark: self.dashboard.set_spark_data(s))
+        except Exception:
+            log.exception("Error building sparkline data")
         # Periodic purge (every ~20 polls = ~10 min)
         self._purge_counter += 1
         if self._purge_counter >= 20:
@@ -266,28 +314,9 @@ class MainWindow(ctk.CTk):
             except Exception:
                 pass
 
-    def _feed_sparklines(self):
-        """Build sparkline data dict from history and push to dashboard."""
-        try:
-            spark = {}
-            for host in self.statuses:
-                cpu_data = get_series(host, "cpu", minutes=30)
-                ram_data = get_series(host, "ram", minutes=30)
-                spark[host] = {
-                    "cpu": [v for _, v in cpu_data if v is not None],
-                    "ram": [v for _, v in ram_data if v is not None],
-                }
-            self.dashboard.set_spark_data(spark)
-        except Exception:
-            pass
-
     def _on_export(self):
         """Export current server data to CSV."""
         export_csv(self.statuses, parent_window=self)
-
-        # Schedule next poll
-        if self._polling:
-            self._poll_job = self.after(self.POLL_INTERVAL_MS, self._poll_once)
 
     def _refresh_now(self):
         """Cancel pending poll and refresh immediately."""
