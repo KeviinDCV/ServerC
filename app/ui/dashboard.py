@@ -229,7 +229,7 @@ class DashboardView(ctk.CTkFrame):
     def _get_unique_names(self) -> List[str]:
         names = [s.server.name for s in self._all_statuses.values() if s.server.name]
         counts = Counter(names)
-        return sorted([n for n, c in counts.items() if c > 1])
+        return sorted(counts.keys())
 
     def _build_filter_chips(self):
         for w in self.filter_row.winfo_children():
