@@ -82,6 +82,7 @@ class MainWindow(ctk.CTk):
             on_edit_server=self._on_edit_server,
             on_delete_server=self._on_delete_server,
             on_export=self._on_export,
+            on_send_message=self._on_send_message_bulk,
         )
         self.detail_view = ServerDetailView(self, on_back=self._show_dashboard)
 
@@ -317,6 +318,71 @@ class MainWindow(ctk.CTk):
     def _on_export(self):
         """Export current server data to CSV."""
         export_csv(self.statuses, parent_window=self)
+
+    def _on_send_message_bulk(self, visible_hosts: list):
+        """Send a message to all users on visible/filtered servers."""
+        from app.server_manager import send_message
+
+        online_hosts = [h for h in visible_hosts
+                        if self.statuses.get(h) and self.statuses[h].is_online]
+
+        if not online_hosts:
+            dialog = ctk.CTkInputDialog(
+                text="No hay servidores en línea para enviar mensaje.",
+                title="Sin servidores",
+            )
+            dialog.get_input()
+            return
+
+        dialog = ctk.CTkInputDialog(
+            text=f"Escribe el mensaje para los usuarios de\n{len(online_hosts)} servidores en línea:",
+            title="Mensaje Masivo a Usuarios",
+        )
+        msg_text = dialog.get_input()
+        if not msg_text or not msg_text.strip():
+            return
+        msg_text = msg_text.strip()
+
+        # Confirm
+        confirm = ctk.CTkInputDialog(
+            text=f"Se enviará a {len(online_hosts)} servidores:\n"
+                 f"'{msg_text}'\n\nEscribe 'ENVIAR' para confirmar:",
+            title="Confirmar Mensaje Masivo",
+        )
+        result = confirm.get_input()
+        if not result or result.strip().upper() != "ENVIAR":
+            return
+
+        log.info("Sending bulk message to %d servers", len(online_hosts))
+
+        def _bg():
+            results = []
+            servers_map = {s.host: s for s in self.servers}
+            for host in online_hosts:
+                server = servers_map.get(host)
+                if server:
+                    ok, msg = send_message(server, msg_text)
+                    results.append((host, ok, msg))
+            self._ui_queue.put(lambda r=results: self._on_bulk_message_done(r))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_bulk_message_done(self, results: list):
+        """Show summary of bulk message results."""
+        total = len(results)
+        ok = sum(1 for _, success, _ in results if success)
+        failed = total - ok
+
+        summary = f"Mensaje enviado: {ok}/{total} exitosos"
+        if failed:
+            errors = [msg for _, success, msg in results if not success]
+            summary += f"\n\nErrores ({failed}):\n" + "\n".join(errors[:10])
+
+        dialog = ctk.CTkInputDialog(
+            text=summary,
+            title="Resultado del Mensaje Masivo",
+        )
+        dialog.get_input()
 
     def _refresh_now(self):
         """Cancel pending poll and refresh immediately."""

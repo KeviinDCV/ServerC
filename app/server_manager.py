@@ -214,3 +214,22 @@ def logoff_user(server: ServerConfig, session_id: str) -> tuple[bool, str]:
             return False, f"Error al cerrar la sesión: {err}"
     except Exception as e:
         return False, f"Error de conexión al cerrar sesión: {e}"
+
+
+def send_message(server: ServerConfig, message: str) -> tuple[bool, str]:
+    """Send a popup message to ALL connected RDP sessions on the server."""
+    try:
+        session = _create_session(server)
+        # Escape single quotes in the message for PowerShell
+        safe_msg = message.replace("'", "''")
+        result = session.run_ps(f"msg * '{safe_msg}'")
+        if result.status_code == 0:
+            return True, f"Mensaje enviado a usuarios en {server.display_name}."
+        else:
+            err = result.std_err.decode("utf-8", errors="replace").strip()
+            # msg.exe returns error if no sessions exist, treat as partial success
+            if "no existe" in err.lower() or "not exist" in err.lower():
+                return True, f"No hay sesiones activas en {server.display_name}."
+            return False, f"Error al enviar mensaje en {server.display_name}: {err}"
+    except Exception as e:
+        return False, f"Error de conexión a {server.display_name}: {e}"

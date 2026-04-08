@@ -1,6 +1,7 @@
 """Server detail view — shows sessions and metrics for a single server."""
 
 import re
+import threading
 import customtkinter as ctk
 from typing import Optional
 
@@ -67,6 +68,14 @@ class ServerDetailView(ctk.CTkFrame):
         self.status_badge = ctk.CTkLabel(top, text="", font=FONTS["small_bold"],
                                           corner_radius=8, width=80, height=26)
         self.status_badge.pack(side="left")
+
+        # Send message button (right side of top bar)
+        self.msg_btn = ctk.CTkButton(
+            top, text="💬 Enviar Mensaje", font=FONTS["small_bold"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            height=35, width=160, command=self._on_send_message,
+        )
+        self.msg_btn.pack(side="right")
 
         # Metrics cards row
         self.metrics_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -260,5 +269,34 @@ class ServerDetailView(ctk.CTkFrame):
         color = COLORS["success"] if success else COLORS["critical"]
         self.error_label.configure(text=msg, text_color=color)
         self.error_label.pack(fill="x", padx=20, pady=5)
-        # Optionally, trigger a refresh of the parent window here, but it auto-refreshes every 30s anyway.
+
+    def _on_send_message(self):
+        """Prompt for a message and send it to all sessions on this server."""
+        from app.server_manager import send_message
+
+        dialog = ctk.CTkInputDialog(
+            text=f"Escribe el mensaje para los usuarios de\n{self.current_status.server.display_name}:",
+            title="Enviar Mensaje a Usuarios",
+        )
+        msg_text = dialog.get_input()
+        if not msg_text or not msg_text.strip():
+            return
+
+        msg_text = msg_text.strip()
+        self.error_label.configure(
+            text=f"Enviando mensaje a usuarios de {self.current_status.server.display_name}...",
+            text_color=COLORS["text_secondary"],
+        )
+        self.error_label.pack(fill="x", padx=20, pady=5)
+
+        def _bg():
+            success, result = send_message(self.current_status.server, msg_text)
+            self.after(0, lambda: self._on_message_result(success, result))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_message_result(self, success: bool, msg: str):
+        color = COLORS["success"] if success else COLORS["critical"]
+        self.error_label.configure(text=msg, text_color=color)
+        self.error_label.pack(fill="x", padx=20, pady=5)
 

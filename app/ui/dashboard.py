@@ -46,13 +46,14 @@ class DashboardView(ctk.CTkFrame):
     """Main dashboard showing all servers as status cards with filtering."""
 
     def __init__(self, parent, on_server_click, on_add_server, on_edit_server,
-                 on_delete_server, on_export=None):
+                 on_delete_server, on_export=None, on_send_message=None):
         super().__init__(parent, fg_color=COLORS["bg_dark"])
         self.on_server_click = on_server_click
         self.on_add_server = on_add_server
         self.on_edit_server = on_edit_server
         self.on_delete_server = on_delete_server
         self.on_export = on_export
+        self.on_send_message = on_send_message
 
         # Card pool — keyed by host, created once, never destroyed
         self._card_pool: Dict[str, _CardWidgets] = {}
@@ -86,7 +87,14 @@ class DashboardView(ctk.CTkFrame):
         btn_row.pack(side="right")
 
         ctk.CTkButton(
-            btn_row, text="📥 Exportar", font=FONTS["small_bold"],
+            btn_row, text="� Mensaje Masivo", font=FONTS["small_bold"],
+            fg_color=COLORS["warning"], hover_color="#d4a017",
+            text_color=COLORS["bg_dark"],
+            height=34, width=140, command=self._do_send_message,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_row, text="�📥 Exportar", font=FONTS["small_bold"],
             fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
             height=34, width=100, command=self._do_export,
         ).pack(side="left", padx=(0, 8))
@@ -221,6 +229,10 @@ class DashboardView(ctk.CTkFrame):
     def _do_export(self):
         if self.on_export:
             self.on_export()
+
+    def _do_send_message(self):
+        if self.on_send_message:
+            self.on_send_message(self._visible_hosts)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Filter logic
